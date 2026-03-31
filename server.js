@@ -1,171 +1,161 @@
 const express = require('express');
-const { Pool } = require('pg');
+const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// اتصال بقاعدة البيانات PostgreSQL
-const pool = new Pool({
-    user: 'postgres',
-    host: 'localhost',
-    database: 'BASYOU',
-    password: '1234',
-    port: 5432,
-});
-
-// اختبار الاتصال
-pool.connect((err, client, release) => {
+// قاعدة البيانات SQLite
+const db = new sqlite3.Database('./basyou.db', (err) => {
     if (err) {
         console.error('❌ خطأ:', err.message);
     } else {
-        console.log('✅ متصل بقاعدة البيانات BASYOU');
-        release();
+        console.log('✅ قاعدة البيانات متصلة');
+        
+        // إنشاء الجداول
+        db.run(`CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            phone TEXT UNIQUE,
+            password TEXT,
+            role TEXT DEFAULT 'customer'
+        )`);
+        
+        db.run(`CREATE TABLE IF NOT EXISTS shipments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracking_number TEXT UNIQUE,
+            customer_id INTEGER,
+            courier_id INTEGER,
+            sender_name TEXT,
+            sender_phone TEXT,
+            sender_address TEXT,
+            receiver_name TEXT,
+            receiver_phone TEXT,
+            receiver_address TEXT,
+            weight REAL,
+            price REAL,
+            payment_method TEXT DEFAULT 'sender',
+            status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+        
+        db.run(`CREATE TABLE IF NOT EXISTS tracking_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shipment_id INTEGER,
+            status TEXT,
+            location TEXT,
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+        
+        // إضافة مستخدمين افتراضيين
+        db.run(`INSERT OR IGNORE INTO users (name, phone, password, role) 
+                VALUES ('مدير النظام', 'admin', 'admin123', 'admin')`);
+        db.run(`INSERT OR IGNORE INTO users (name, phone, password, role) 
+                VALUES ('مندوب توصيل', '01001234568', '123456', 'courier')`);
+        db.run(`INSERT OR IGNORE INTO users (name, phone, password, role) 
+                VALUES ('أحمد محمد', '01001234567', '123456', 'customer')`);
+        
+        console.log('✅ الجداول والمستخدمين جاهزين');
     }
 });
 
-// ==================== جميع الـ APIs ====================
+// ==================== APIs ====================
 
-// الرئيسي
 app.get('/', (req, res) => {
-    res.json({ 
-        company: 'BASYOU',
-        message: 'السيستم شغال يا معلم! 🚀'
-    });
+    res.json({ company: 'BASYOU', message: 'السيستم شغال يا معلم! 🚀' });
 });
 
 // تسجيل الدخول
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', (req, res) => {
     const { phone, password } = req.body;
-    try {
-        const result = await pool.query(
-            'SELECT id, name, phone, role FROM users WHERE phone = $1 AND password = $2',
-            [phone, password]
-        );
-        if (result.rows.length === 0) {
-            res.json({ success: false, message: 'بيانات الدخول غلط' });
-        } else {
-            res.json({ success: true, user: result.rows[0] });
-        }
-    } catch (err) {
-        res.json({ success: false, message: 'خطأ' });
-    }
+    db.get('SELECT id, name, phone, role FROM users WHERE phone = ? AND password = ?', [phone, password], (err, user) => {
+        if (err) res.json({ success: false, message: 'خطأ' });
+        else if (!user) res.json({ success: false, message: 'بيانات الدخول غلط' });
+        else res.json({ success: true, user });
+    });
 });
 
-// جلب كل الشحنات (للمدير)
-app.get('/api/shipments', async (req, res) => {
-    try {
-        const result = await pool.query(
-            'SELECT * FROM shipments ORDER BY created_at DESC'
-        );
-        res.json({ success: true, shipments: result.rows });
-    } catch (err) {
-        res.json({ success: false, message: err.message });
-    }
+// جلب كل الشحنات
+app.get('/api/shipments', (req, res) => {
+    db.all('SELECT * FROM shipments ORDER BY created_at DESC', [], (err, shipments) => {
+        res.json({ success: true, shipments: shipments || [] });
+    });
 });
 
-// إنشاء شحنة جديدة
-app.post('/api/shipments', async (req, res) => {
+// إنشاء شحنة
+app.post('/api/shipments', (req, res) => {
     const { customer_id, sender_name, sender_phone, sender_address, receiver_name, receiver_phone, receiver_address, weight, payment_method } = req.body;
     const tracking_number = 'BAS' + Math.floor(Math.random() * 1000000);
     const price = weight * 20;
     
-    try {
-        const result = await pool.query(
-            `INSERT INTO shipments 
-             (tracking_number, customer_id, sender_name, sender_phone, sender_address, receiver_name, receiver_phone, receiver_address, weight, price, payment_method)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             RETURNING *`,
-            [tracking_number, customer_id, sender_name, sender_phone, sender_address, receiver_name, receiver_phone, receiver_address, weight, price, payment_method || 'sender']
-        );
-        res.json({ success: true, shipment: result.rows[0] });
-    } catch (err) {
-        res.json({ success: false, message: err.message });
-    }
+    db.run(
+        `INSERT INTO shipments (tracking_number, customer_id, sender_name, sender_phone, sender_address, receiver_name, receiver_phone, receiver_address, weight, price, payment_method)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [tracking_number, customer_id, sender_name, sender_phone, sender_address, receiver_name, receiver_phone, receiver_address, weight, price, payment_method || 'sender'],
+        function(err) {
+            if (err) res.json({ success: false, message: err.message });
+            else res.json({ success: true, shipment: { id: this.lastID, tracking_number, price } });
+        }
+    );
 });
 
 // تتبع شحنة
-app.get('/api/track/:tracking_number', async (req, res) => {
+app.get('/api/track/:tracking_number', (req, res) => {
     const { tracking_number } = req.params;
-    try {
-        const shipment = await pool.query('SELECT * FROM shipments WHERE tracking_number = $1', [tracking_number]);
-        if (shipment.rows.length === 0) {
-            return res.json({ success: false, message: 'الشحنة غير موجودة' });
+    db.get('SELECT * FROM shipments WHERE tracking_number = ?', [tracking_number], (err, shipment) => {
+        if (err) res.json({ success: false, message: err.message });
+        else if (!shipment) res.json({ success: false, message: 'الشحنة غير موجودة' });
+        else {
+            db.all('SELECT * FROM tracking_history WHERE shipment_id = ? ORDER BY created_at DESC', [shipment.id], (err, history) => {
+                res.json({ success: true, shipment, history: history || [] });
+            });
         }
-        const history = await pool.query('SELECT * FROM tracking_history WHERE shipment_id = $1 ORDER BY created_at DESC', [shipment.rows[0].id]);
-        res.json({ success: true, shipment: shipment.rows[0], history: history.rows });
-    } catch (err) {
-        res.json({ success: false, message: err.message });
-    }
+    });
 });
 
 // شحنات عميل
-app.get('/api/customer/:id/shipments', async (req, res) => {
+app.get('/api/customer/:id/shipments', (req, res) => {
     const { id } = req.params;
-    try {
-        const result = await pool.query('SELECT * FROM shipments WHERE customer_id = $1 ORDER BY created_at DESC', [id]);
-        res.json({ success: true, shipments: result.rows });
-    } catch (err) {
-        res.json({ success: false, message: err.message });
-    }
+    db.all('SELECT * FROM shipments WHERE customer_id = ? ORDER BY created_at DESC', [id], (err, shipments) => {
+        res.json({ success: true, shipments: shipments || [] });
+    });
 });
 
 // شحنات مندوب
-app.get('/api/courier/:id/shipments', async (req, res) => {
+app.get('/api/courier/:id/shipments', (req, res) => {
     const { id } = req.params;
-    try {
-        const result = await pool.query(
-            'SELECT * FROM shipments WHERE courier_id = $1 ORDER BY created_at DESC',
-            [id]
-        );
-        res.json({ success: true, shipments: result.rows });
-    } catch (err) {
-        res.json({ success: false, message: err.message });
-    }
+    db.all('SELECT * FROM shipments WHERE courier_id = ? ORDER BY created_at DESC', [id], (err, shipments) => {
+        res.json({ success: true, shipments: shipments || [] });
+    });
 });
 
 // تحديث حالة الشحنة
-app.put('/api/shipments/:id/status', async (req, res) => {
+app.put('/api/shipments/:id/status', (req, res) => {
     const { id } = req.params;
     const { status, location, notes, courier_id } = req.body;
-    try {
-        await pool.query('UPDATE shipments SET status = $1, courier_id = $2 WHERE id = $3', [status, courier_id, id]);
-        await pool.query('INSERT INTO tracking_history (shipment_id, status, location, notes) VALUES ($1, $2, $3, $4)', [id, status, location, notes]);
-        res.json({ success: true, message: 'تم التحديث' });
-    } catch (err) {
-        res.json({ success: false, message: err.message });
-    }
+    db.run('UPDATE shipments SET status = ?, courier_id = ? WHERE id = ?', [status, courier_id, id], (err) => {
+        if (err) res.json({ success: false, message: err.message });
+        else {
+            db.run('INSERT INTO tracking_history (shipment_id, status, location, notes) VALUES (?, ?, ?, ?)', [id, status, location, notes], () => {
+                res.json({ success: true, message: 'تم التحديث' });
+            });
+        }
+    });
 });
 
 // تسجيل مستخدم جديد
-app.post('/api/register', async (req, res) => {
+app.post('/api/register', (req, res) => {
     const { name, phone, password, role } = req.body;
-    try {
-        const result = await pool.query(
-            'INSERT INTO users (name, phone, password, role) VALUES ($1, $2, $3, $4) RETURNING id, name, phone, role',
-            [name, phone, password, role || 'customer']
-        );
-        res.json({ success: true, user: result.rows[0] });
-    } catch (err) {
-        if (err.code === '23505') {
-            res.json({ success: false, message: 'رقم التليفون موجود بالفعل' });
-        } else {
-            res.json({ success: false, message: err.message });
-        }
-    }
+    db.run('INSERT INTO users (name, phone, password, role) VALUES (?, ?, ?, ?)', [name, phone, password, role || 'customer'], function(err) {
+        if (err) res.json({ success: false, message: 'رقم التليفون موجود بالفعل' });
+        else res.json({ success: true, user: { id: this.lastID, name, phone, role: role || 'customer' } });
+    });
 });
 
-// تشغيل السيرفر
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`
-    ═══════════════════════════════════════
-         BASYOU - نظام الشحن العالمي
-    ═══════════════════════════════════════
-    ✅ السيرفر شغال: http://localhost:${PORT}
-    ✅ قاعدة البيانات: PostgreSQL
-    ✅ جاهز للاستخدام
-    ═══════════════════════════════════════
-    `);
+    console.log(`✅ BASYOU سيرفر شغال على http://localhost:${PORT}`);
 });
